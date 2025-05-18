@@ -24,7 +24,7 @@ sm_error = 0
 
 # Parameters
 W = 8  # Number of bits for quantization
-LUT_SIZE = 7  # x_q â‰ˆ 6 for W=8
+LUT_SIZE = 7  # x_q â‰? 6 for W=8
 SCALE = (1 << W) - 1  # 255 for W=8
 
 # Build LUT
