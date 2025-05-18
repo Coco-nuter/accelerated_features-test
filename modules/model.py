@@ -9,8 +9,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import time
 
-basic_time = []
-
 class BasicLayer(nn.Module):
 	"""
 	  Basic Convolutional Layer: Conv2d -> BatchNorm -> ReLU
@@ -19,7 +17,7 @@ class BasicLayer(nn.Module):
 		super().__init__()
 		self.layer = nn.Sequential(
 									  nn.Conv2d( in_channels, out_channels, kernel_size, padding = padding, stride=stride, dilation=dilation, bias = bias),
-									  nn.BatchNorm2d(out_channels, affine=False),
+									  nn.BatchNorm2d(out_channels, affine=True),
 									  nn.ReLU(inplace = True),
 									)
 
@@ -31,6 +29,7 @@ class XFeatModel(nn.Module):
 	   Implementation of architecture described in 
 	   "XFeat: Accelerated Features for Lightweight Image Matching, CVPR 2024."
 	"""
+	quant = False
 
 	def __init__(self):
 		super().__init__()
@@ -83,7 +82,6 @@ class XFeatModel(nn.Module):
 										BasicLayer(64, 64, 1, padding=0),
 										nn.Conv2d (64, 1, 1),
 										nn.Sigmoid()
-										# nn.ReLU()
 									)
 
 
@@ -99,16 +97,16 @@ class XFeatModel(nn.Module):
 
 		self.fine_matcher =  nn.Sequential(
 											nn.Linear(128, 512),
-											nn.BatchNorm1d(512, affine=False),
+											nn.BatchNorm1d(512, affine=True),
 									  		nn.ReLU(inplace = True),
 											nn.Linear(512, 512),
-											nn.BatchNorm1d(512, affine=False),
+											nn.BatchNorm1d(512, affine=True),
 									  		nn.ReLU(inplace = True),
 											nn.Linear(512, 512),
-											nn.BatchNorm1d(512, affine=False),
+											nn.BatchNorm1d(512, affine=True),
 									  		nn.ReLU(inplace = True),
 											nn.Linear(512, 512),
-											nn.BatchNorm1d(512, affine=False),
+											nn.BatchNorm1d(512, affine=True),
 									  		nn.ReLU(inplace = True),
 											nn.Linear(512, 64),
 										)
@@ -122,8 +120,19 @@ class XFeatModel(nn.Module):
 			.reshape(B, C, H//ws, W//ws, ws**2)
 		return x.permute(0, 1, 4, 2, 3).reshape(B, -1, H//ws, W//ws)
 
+	def unfold2d_new(self, x, ws=2):
+		B, C, H, W = x.shape
+		# 计算滑动窗口的块数
+		H_new = H // ws
+		W_new = W // ws
+		
+		# 使用 view 重新组织张量
+		x_unfold = x.view(B, C, H_new, ws, W_new, ws).permute(0, 1, 2, 4, 3, 5).contiguous()
+		x_unfold = x_unfold.reshape(B, C, H//ws, W//ws, ws**2)
+		x_unfold = x_unfold.permute(0, 1, 4, 2, 3).reshape(B, -1, H//ws, W//ws)
+		return x_unfold
 
-	def forward(self, x):
+	def forward(self, x, unfold2d_input=None):
 		"""
 			input:
 				x -> torch.Tensor(B, C, H, W) grayscale or rgb images
@@ -133,20 +142,17 @@ class XFeatModel(nn.Module):
 				heatmap   ->  torch.Tensor(B,  1, H/8, W/8) reliability map
 
 		"""
-		global basic_time
-		#dont backprop through normalization
-		with torch.no_grad():
-			x = x.mean(dim=1, keepdim = True)
-			x = self.norm(x)
+		if not self.quant:
+			#dont backprop through normalization
+			with torch.no_grad():
+				x = x.mean(dim=1, keepdim = True)
+				x = self.norm(x)
 
 		#main backbone
 		x1 = self.block1(x)
 		x2 = self.block2(x1 + self.skip1(x))
 		x3 = self.block3(x2)
-		t0 = time.perf_counter()
 		x4 = self.block4(x3)
-		t1 = time.perf_counter()
-		basic_time.append((t1 - t0) * 1000)
 		x5 = self.block5(x4)
 
 		#pyramid fusion
@@ -156,6 +162,12 @@ class XFeatModel(nn.Module):
 
 		#heads
 		heatmap = self.heatmap_head(feats) # Reliability map
-		keypoints = self.keypoint_head(self._unfold2d(x, ws=8)) #Keypoint map logits
+		if self.quant:
+			keypoints = self.keypoint_head(unfold2d_input)
+		else:
+			keypoints = self.keypoint_head(self._unfold2d(x, ws=8)) #Keypoint map logits
+
+		if self.quant:
+			feats = feats.permute(0, 3, 1, 2)
 
 		return feats, keypoints, heatmap

@@ -11,11 +11,11 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import cv2
 import numpy as np
-import poselib
+#import poselib
 import json
 import copy
 
-import tqdm
+#import tqdm
 
 # Disable scientific notation
 np.set_printoptions(suppress=True)
@@ -194,7 +194,6 @@ def compute_maa(pairs, thresholds=[5, 10, 20]):
     for t in thresholds:
         acc = (errors <= t).sum() / len(errors)
         print("mAcc@%d: %.1f "%(t, acc*100))
-    
 
 @torch.inference_mode()
 def run_pose_benchmark(matcher_fn, loader, ransac_thr=2.5):
@@ -218,7 +217,9 @@ def run_pose_benchmark(matcher_fn, loader, ransac_thr=2.5):
 
     pairs = []
     cnt = 0
-    for d in tqdm.tqdm(loader):
+    data_to_save = []
+    save_dir = "./saved_pt"
+    for i, d in enumerate(loader):
         d_error = {}
         src_pts, dst_pts = matcher_fn(tensor2bgr(d['image0']), tensor2bgr(d['image1']))
 
@@ -230,22 +231,20 @@ def run_pose_benchmark(matcher_fn, loader, ransac_thr=2.5):
         src_pts = src_pts * d['scale0'].numpy()
         dst_pts = dst_pts * d['scale1'].numpy()
         d.update({"pts0":src_pts, "pts1": dst_pts,'ransac_thr': ransac_thr})
-        compute_pose_error(d)
-        pairs.append(d)
+        
+        save_file = os.path.join(save_dir, f"data_{cnt}.pt")
+        torch.save(d, save_file)
+        print(f"data_{cnt}.pt has been saved!")
+    #    compute_pose_error(d)
+    #    pairs.append(d)
         cnt+=1
 
-    compute_maa(pairs)
+    #compute_maa(pairs)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run pose benchmark with matcher")
-    parser.add_argument("--quant", action="store_true", help="Quantize mode")
-    parser.add_argument("--quant-s", action="store_true", help="Quantize the second model")
-    parser.add_argument("--quant-mode", type=str, default="calib", choices=["calib", "test"],
-                        help="Quantization mode (calib or test)")
-    parser.add_argument('--dataset-dir', type=str, required=True,
+    parser.add_argument('--dataset-dir', type=str, default="data/MegaDepth-1500/Mega1500",
                         help="Path to MegaDepth dataset root")
-    parser.add_argument('--matcher', type=str, choices=['xfeat', 'xfeat-star', 'alike'], default='xfeat',
-                        help="Matcher to use (xfeat or alike)")
     parser.add_argument('--ransac-thr', type=float, default=2.5,
                         help="RANSAC threshold value in pixels (default: 2.5)")
     return parser.parse_args()
@@ -255,33 +254,12 @@ if __name__ == '__main__':
 
     args = parse_args()
 
-    dataset = MegaDepth1500( json_file = './assets/megadepth_1.json',
+    dataset = MegaDepth1500( json_file = './data/megadepth_1500.json',
                              root_dir =  args.dataset_dir + "/megadepth_test_1500")
 
     loader = DataLoader(dataset, batch_size=1, shuffle=False)
 
-    if args.matcher == 'xfeat':
-        print("Running benchmark for XFeat..")
-        from modules.xfeat import XFeat
-        xfeat = XFeat()
-        run_pose_benchmark(matcher_fn = xfeat.match_xfeat, loader = loader, ransac_thr = args.ransac_thr)
-
-    elif args.matcher == 'xfeat-star':
-        from modules.xfeat import XFeat
-        print("Running benchmark for XFeat*..")
-        xfeat = XFeat(top_k = 10_000)
-        if args.quant:
-            xfeat.quant = True
-            xfeat.quant_mode = args.quant_mode
-            if args.quant_s:
-                xfeat.quant_s = True
-            xfeat.prepare_quant_model()
-        run_pose_benchmark(matcher_fn = xfeat.match_xfeat_star, loader = loader, ransac_thr = args.ransac_thr)
-        if args.quant:
-            xfeat.export_qaunt_model()
-        
-
-    elif args.matcher == 'alike':
-        from third_party import alike_wrapper as alike
-        print("Running benchmark for ALIKE..")
-        run_pose_benchmark(matcher_fn = alike.match_alike, loader = loader, ransac_thr = args.ransac_thr)
+    from xfeat import XFeat
+    print("Running benchmark for XFeat*..")
+    xfeat = XFeat(top_k = 10_000)
+    run_pose_benchmark(matcher_fn = xfeat.match_xfeat_star, loader = loader, ransac_thr = args.ransac_thr)
