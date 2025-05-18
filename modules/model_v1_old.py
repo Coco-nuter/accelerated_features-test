@@ -16,7 +16,7 @@ class BasicLayer(nn.Module):
 		super().__init__()
 		self.layer = nn.Sequential(
 			nn.Conv2d(in_channels, out_channels, kernel_size, padding=padding, stride=stride, dilation=dilation, bias=bias),
-			nn.BatchNorm2d(out_channels, affine=False),
+			nn.BatchNorm2d(out_channels, affine=True),
 			nn.ReLU(inplace=True),
 		)
 
@@ -34,13 +34,13 @@ class DepthwiseSeparableLayer(nn.Module):
 		# depthwise convolution: 每个通道单独卷积
 		self.depthwise = nn.Sequential(
 			nn.Conv2d(in_channels, in_channels, kernel_size, stride=stride, padding=padding, groups=in_channels, bias=bias),
-			nn.BatchNorm2d(in_channels, affine=False),
+			nn.BatchNorm2d(in_channels, affine=True),
 			nn.ReLU(inplace=True),
 		)
 		# pointwise convolution: 1×1 卷积混合通道信息
 		self.pointwise = nn.Sequential(
 			nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=bias),
-			nn.BatchNorm2d(out_channels, affine=False),
+			nn.BatchNorm2d(out_channels, affine=True),
 			nn.ReLU(inplace=True),
 		)
 
@@ -54,6 +54,8 @@ class XFeatModel(nn.Module):
 	   Implementation of architecture described in 
 	   "XFeat: Accelerated Features for Lightweight Image Matching, CVPR 2024."
 	"""
+	quant = False
+
 	def __init__(self):
 		super().__init__()
 		self.norm = nn.InstanceNorm2d(1)
@@ -123,16 +125,16 @@ class XFeatModel(nn.Module):
 		########### ⬇️ Fine Matcher MLP ⬇️ ###########
 		self.fine_matcher = nn.Sequential(
 			nn.Linear(128, 512),
-			nn.BatchNorm1d(512, affine=False),
+			nn.BatchNorm1d(512, affine=True),
 			nn.ReLU(inplace=True),
 			nn.Linear(512, 512),
-			nn.BatchNorm1d(512, affine=False),
+			nn.BatchNorm1d(512, affine=True),
 			nn.ReLU(inplace=True),
 			nn.Linear(512, 512),
-			nn.BatchNorm1d(512, affine=False),
+			nn.BatchNorm1d(512, affine=True),
 			nn.ReLU(inplace=True),
 			nn.Linear(512, 512),
-			nn.BatchNorm1d(512, affine=False),
+			nn.BatchNorm1d(512, affine=True),
 			nn.ReLU(inplace=True),
 			nn.Linear(512, 64),
 		)
@@ -145,7 +147,7 @@ class XFeatModel(nn.Module):
 		x = x.unfold(2, ws, ws).unfold(3, ws, ws).reshape(B, C, H//ws, W//ws, ws**2)
 		return x.permute(0, 1, 4, 2, 3).reshape(B, -1, H//ws, W//ws)
 
-	def forward(self, x):
+	def forward(self, x, unfold2d_input=None):
 		"""
 			input:
 				x -> torch.Tensor(B, C, H, W) grayscale or rgb images
@@ -155,9 +157,10 @@ class XFeatModel(nn.Module):
 				heatmap   -> torch.Tensor(B,  1, H/8, W/8) reliability map
 		"""
 		# 不对归一化层进行反向传播
-		with torch.no_grad():
-			x = x.mean(dim=1, keepdim=True)
-			x = self.norm(x)
+		if not self.quant:
+			with torch.no_grad():
+				x = x.mean(dim=1, keepdim=True)
+				x = self.norm(x)
 
 		# 主干网络 forward
 		x1 = self.block1(x)
@@ -173,6 +176,11 @@ class XFeatModel(nn.Module):
 
 		# heads
 		heatmap = self.heatmap_head(feats)  # Reliability map
-		keypoints = self.keypoint_head(self._unfold2d(x, ws=8))  # Keypoint map logits
-
+		if self.quant:
+			keypoints = self.keypoint_head(unfold2d_input)
+		else:
+			keypoints = self.keypoint_head(self._unfold2d(x, ws=8))  # Keypoint map logits
+		
+		if self.quant:
+			feats = feats.permute(0, 3, 1, 2)
 		return feats, keypoints, heatmap
